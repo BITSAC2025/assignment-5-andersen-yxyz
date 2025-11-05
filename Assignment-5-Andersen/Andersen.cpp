@@ -39,19 +39,20 @@ void Andersen::runPointerAnalysis()
     
     WorkList<unsigned> worklist;
     
-    // Initialize: process all address constraints (*p = &a)
-    // Address constraints initialize the point-to sets
+    // Initialize: process all address constraints (p = &o)
+    // Address constraints: o --Addr--> p, meaning o ∈ pts(p)
+    // In ConstraintGraph: src is object o, dst is pointer p
     for (auto it = consg->begin(); it != consg->end(); ++it)
     {
         SVF::ConstraintEdge* edge = *it;
         if (edge->getEdgeKind() == SVF::ConstraintEdge::Addr)
         {
-            unsigned src = edge->getSrcID();
-            unsigned dst = edge->getDstID();
-            // Add address to point-to set: pts(src) = {dst}
-            if (pts[src].insert(dst).second)
+            unsigned src = edge->getSrcID();  // object o
+            unsigned dst = edge->getDstID();   // pointer p
+            // Add object to point-to set: o ∈ pts(p)
+            if (pts[dst].insert(src).second)
             {
-                worklist.push(src);
+                worklist.push(dst);
             }
         }
     }
@@ -61,52 +62,56 @@ void Andersen::runPointerAnalysis()
     {
         unsigned p = worklist.pop();
         
-        // Process copy constraints: p = q
+        // Process copy constraints: q = p
+        // Copy constraint: p --Copy--> q, meaning pts(p) ⊆ pts(q)
+        // When pts(p) is updated, propagate to pts(q)
         for (auto it = consg->begin(); it != consg->end(); ++it)
         {
             SVF::ConstraintEdge* edge = *it;
             if (edge->getEdgeKind() == SVF::ConstraintEdge::Copy)
             {
-                unsigned src = edge->getSrcID();
-                unsigned dst = edge->getDstID();
+                unsigned src = edge->getSrcID();  // pointer p
+                unsigned dst = edge->getDstID();   // pointer q
                 
-                if (dst == p)
+                if (src == p)
                 {
-                    // Copy constraint: src = dst, propagate pts(dst) to pts(src)
+                    // Copy constraint: propagate pts(p) to pts(q)
                     bool changed = false;
-                    for (unsigned pointee : pts[dst])
+                    for (unsigned pointee : pts[p])
                     {
-                        if (pts[src].insert(pointee).second)
+                        if (pts[dst].insert(pointee).second)
                         {
                             changed = true;
                         }
                     }
                     if (changed)
                     {
-                        worklist.push(src);
+                        worklist.push(dst);
                     }
                 }
             }
         }
         
-        // Process load constraints: p = *q
+        // Process load constraints: q = *p
+        // Load constraint: p --Load--> q, meaning ∀o ∈ pts(p): pts(o) ⊆ pts(q)
+        // When pts(p) is updated, for each o in pts(p), propagate pts(o) to pts(q)
         for (auto it = consg->begin(); it != consg->end(); ++it)
         {
             SVF::ConstraintEdge* edge = *it;
             if (edge->getEdgeKind() == SVF::ConstraintEdge::Load)
             {
-                unsigned src = edge->getSrcID();
-                unsigned dst = edge->getDstID();
+                unsigned src = edge->getSrcID();  // pointer p
+                unsigned dst = edge->getDstID();   // pointer q
                 
-                if (dst == p)
+                if (src == p)
                 {
-                    // Load constraint: src = *dst, for each o in pts(dst), propagate pts(o) to pts(src)
+                    // Load constraint: for each o in pts(p), propagate pts(o) to pts(q)
                     bool changed = false;
-                    for (unsigned o : pts[dst])
+                    for (unsigned o : pts[p])
                     {
                         for (unsigned pointee : pts[o])
                         {
-                            if (pts[src].insert(pointee).second)
+                            if (pts[dst].insert(pointee).second)
                             {
                                 changed = true;
                             }
@@ -114,28 +119,31 @@ void Andersen::runPointerAnalysis()
                     }
                     if (changed)
                     {
-                        worklist.push(src);
+                        worklist.push(dst);
                     }
                 }
             }
         }
         
         // Process store constraints: *p = q
+        // Store constraint: q --Store--> p, meaning ∀o ∈ pts(p): pts(q) ⊆ pts(o)
+        // When pts(p) is updated, for each o in pts(p), propagate pts(q) to pts(o)
+        // When pts(q) is updated, for each o in pts(p), propagate pts(q) to pts(o)
         for (auto it = consg->begin(); it != consg->end(); ++it)
         {
             SVF::ConstraintEdge* edge = *it;
             if (edge->getEdgeKind() == SVF::ConstraintEdge::Store)
             {
-                unsigned src = edge->getSrcID();
-                unsigned dst = edge->getDstID();
+                unsigned src = edge->getSrcID();  // pointer q
+                unsigned dst = edge->getDstID();  // pointer p
                 
-                if (src == p)
+                if (dst == p)
                 {
-                    // Store constraint: *src = dst, for each o in pts(src), propagate pts(dst) to pts(o)
+                    // Store constraint: for each o in pts(p), propagate pts(q) to pts(o)
                     bool changed = false;
-                    for (unsigned o : pts[src])
+                    for (unsigned o : pts[p])
                     {
-                        for (unsigned pointee : pts[dst])
+                        for (unsigned pointee : pts[src])
                         {
                             if (pts[o].insert(pointee).second)
                             {
@@ -145,8 +153,31 @@ void Andersen::runPointerAnalysis()
                     }
                     if (changed)
                     {
-                        // Add all objects in pts(src) to worklist
-                        for (unsigned o : pts[src])
+                        // Add all objects in pts(p) to worklist
+                        for (unsigned o : pts[p])
+                        {
+                            worklist.push(o);
+                        }
+                    }
+                }
+                else if (src == p)
+                {
+                    // When pts(q) is updated, propagate to all objects o in pts(p)
+                    bool changed = false;
+                    for (unsigned o : pts[dst])
+                    {
+                        for (unsigned pointee : pts[p])
+                        {
+                            if (pts[o].insert(pointee).second)
+                            {
+                                changed = true;
+                            }
+                        }
+                    }
+                    if (changed)
+                    {
+                        // Add all objects in pts(dst) to worklist
+                        for (unsigned o : pts[dst])
                         {
                             worklist.push(o);
                         }
